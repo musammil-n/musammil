@@ -105,18 +105,20 @@ async def handle_video_with_watermarks(client, message):
         if os.path.exists(DEFAULT_IMAGE_WATERMARK_PATH):
             image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
             
-            # Define the scale for the image watermark (10% of video width)
-            image_watermark_scale_expr = 'iw*0.1:-1' 
-            overlay_x = 10
-            overlay_y = 10
+            # FIX: Use proper scale expression without manual escaping
+            # Calculate target width as 10% of video width
+            target_width = max(50, int(video_width * 0.1))  # Minimum 50px width
             
             # Process the image watermark stream first
-            watermark_processed = image_watermark_input.video.filter_('scale', image_watermark_scale_expr).filter_('format', 'rgba').filter_('colorchannelmixer', aa=0.7)
+            watermark_processed = (image_watermark_input.video
+                                 .filter('scale', target_width, -1)  # Use integers instead of expression
+                                 .filter('format', 'rgba')
+                                 .filter('colorchannelmixer', aa=0.7))
 
             # Overlay the processed watermark onto the main video stream
-            video_stream = ffmpeg.overlay(video_stream, watermark_processed, x=overlay_x, y=overlay_y)
+            video_stream = ffmpeg.overlay(video_stream, watermark_processed, x=10, y=10)
             
-            logger.info("Image watermark configured for top-left position with dynamic scaling and overlay.")
+            logger.info(f"Image watermark configured for top-left position with width {target_width}px.")
         else:
             logger.warning("Default image watermark file not found. Skipping image watermark.")
 
@@ -128,15 +130,40 @@ async def handle_video_with_watermarks(client, message):
         dynamic_font_size = max(18, int(video_height * 0.03)) 
         logger.info(f"Calculated text watermark font size: {dynamic_font_size}")
 
-        # The fontfile path needs to be properly escaped for FFmpeg's drawtext filter
-        # Using a raw string for safety, and double backslashes for the colon escaping
-        fontfile_escaped = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'.replace(':', '\\\\:') 
-
-        # Apply the drawtext filter to the current video_stream
-        video_stream = video_stream.filter('drawtext', fontfile=fontfile_escaped, text=text_watermark_content,
-                                            fontcolor=f'white@{text_opacity}', fontsize=dynamic_font_size,
-                                            x='(w-text_w)/2', y='H-text_h-10')
-        logger.info("Text watermark configured for bottom-center position with dynamic font size.")
+        # FIX: Simplified font file path - try common system fonts
+        # First try DejaVu Sans, then fall back to Arial or Liberation Sans
+        possible_fonts = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            '/System/Library/Fonts/Arial.ttf',  # macOS
+            'C:/Windows/Fonts/arial.ttf'  # Windows
+        ]
+        
+        fontfile_path = None
+        for font_path in possible_fonts:
+            if os.path.exists(font_path):
+                fontfile_path = font_path
+                break
+        
+        if fontfile_path:
+            # Apply the drawtext filter to the current video_stream
+            video_stream = video_stream.filter('drawtext', 
+                                             fontfile=fontfile_path,
+                                             text=text_watermark_content,
+                                             fontcolor=f'white@{text_opacity}', 
+                                             fontsize=dynamic_font_size,
+                                             x='(main_w-text_w)/2',  # Use main_w instead of w
+                                             y='main_h-text_h-10')   # Use main_h instead of H
+            logger.info(f"Text watermark configured with font: {fontfile_path}")
+        else:
+            # Fallback: use drawtext without fontfile (uses default font)
+            video_stream = video_stream.filter('drawtext',
+                                             text=text_watermark_content,
+                                             fontcolor=f'white@{text_opacity}',
+                                             fontsize=dynamic_font_size,
+                                             x='(main_w-text_w)/2',
+                                             y='main_h-text_h-10')
+            logger.info("Text watermark configured with default system font.")
 
         # Define the final output, using the now fully processed 'video_stream'
         final_output = ffmpeg.output(
