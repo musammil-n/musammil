@@ -113,39 +113,19 @@ async def handle_video_with_watermarks(client, message):
         # We need to scale the image watermark first, then overlay it.
         # This uses FFmpeg's named pads for clarity in complex filtergraphs.
         
-        # Define the scale for the image watermark (10% of video width)
-        image_watermark_scale_expr = 'scale=iw*0.1:-1' 
-        
-        # Define the position for the overlay
-        overlay_x = 10
-        overlay_y = 10
-        
-        # Build the complex filter string for the image overlay
-        # [0:v] is the main video stream
-        # [1:v] is the image watermark stream
-        # Then, scale the image, format it, colorchannelmix (for opacity), and finally overlay
-        # We use a named output 'v' for the video stream after watermarking.
         if os.path.exists(DEFAULT_IMAGE_WATERMARK_PATH):
-            # Complex filter string: [main_video_input][watermark_input]overlay_filter,drawtext_filter[output]
-            # FFmpeg filtergraph syntax: `[in1][in2]filtername[out]`
-            # Step 1: Scale watermark and apply opacity
-            # We don't use ffmpeg.filter() here directly, but construct the string for complex_filter
-            # The order in filter_graph_commands matters for overlaying.
-
-            # Example: [0:v] is main video, [1:v] is watermark image
-            # [1:v]scale=iw*0.1:-1,format=rgba,colorchannelmixer=aa=0.7[wm_scaled] # Scale and set opacity for watermark
-            # [0:v][wm_scaled]overlay=x=10:y=10[video_with_image_wm] # Overlay scaled watermark onto video
-
-            # Initial video stream and watermark stream ready for complex_filter
-            # The main video stream is input 0, watermark image is input 1.
+            # Define the scale for the image watermark (10% of video width)
+            watermark_scale_expr = 'iw*0.1:-1' # <--- THIS LINE IS NOW CORRECTLY PLACED AND DEFINED
             
-            # --- Build a series of filter chains for complex_filter ---
+            # Define the position for the overlay
+            overlay_x = 10
+            overlay_y = 10
+            
             # Define input streams as references (e.g., [0:v] for main video, [1:v] for image watermark)
             video_input_ref = main_video_input.video
             image_input_ref = image_watermark_input.video
 
             # Apply scale, format, and colorchannelmixer to the image watermark stream
-            # We explicitly define input and output pads here:
             image_watermark_processing_stream = image_input_ref.filter_('scale', watermark_scale_expr).filter_('format', 'rgba').filter_('colorchannelmixer', aa=0.7)
 
             # Overlay the processed watermark onto the main video stream
@@ -170,20 +150,7 @@ async def handle_video_with_watermarks(client, message):
         # The fontfile path requires proper escaping for FFmpeg's drawtext filter
         fontfile_escaped = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'.replace(':', '\\:')
 
-        # Building the drawtext filter string manually
-        # Note: 'x' and 'y' expressions also need proper quoting if they contain spaces or special chars
-        drawtext_filter_string = (
-            f"drawtext=fontfile='{fontfile_escaped}':"
-            f"text='{text_watermark_content}':"
-            f"fontcolor=white@{text_opacity}:"
-            f"fontsize={dynamic_font_size}:"
-            f"x=(w-text_w)/2:"
-            f"y=H-text_h-10"
-        )
-        
         # Apply the drawtext filter
-        # We must use complex_filter for this setup, or ensure it's chained correctly.
-        # Since we're trying to fix the complex filter issues, let's keep it chained.
         video_stream = video_stream.filter('drawtext', fontfile=fontfile_escaped, text=text_watermark_content,
                                             fontcolor=f'white@{text_opacity}', fontsize=dynamic_font_size,
                                             x='(w-text_w)/2', y='H-text_h-10')
