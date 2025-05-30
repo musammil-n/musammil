@@ -4,6 +4,7 @@ import urllib.request
 from pyrogram import Client, filters
 import ffmpeg
 import logging
+from pyrogram.errors import MessageNotModified # Import the specific error
 
 # Set up logging for this module
 logger = logging.getLogger(__name__)
@@ -51,10 +52,8 @@ async def handle_video_with_watermarks(client, message):
     input_media = None
     if message.video:
         input_media = message.video
-        is_video_file = True
     elif message.document and message.document.mime_type and message.document.mime_type.startswith('video/'):
         input_media = message.document.video # message.document.video holds video metadata for document
-        is_video_file = True
     else:
         # Not a video or unsupported file type, ignore
         await message.reply_text("Please send a video file (as a direct video or a video document).")
@@ -82,7 +81,13 @@ async def handle_video_with_watermarks(client, message):
             return
 
         logger.info(f"Video downloaded: {input_file_path}")
-        await status_message.edit_text("Downloaded. Applying watermarks...")
+        
+        # --- FIX for MessageNotModified error ---
+        try:
+            await status_message.edit_text("Downloaded. Applying watermarks...")
+        except MessageNotModified:
+            logger.debug("Status message not modified, skipping edit_text.")
+            pass # Ignore if message is already identical
 
         base_name = os.path.basename(input_file_path).rsplit('.', 1)[0]
         output_file_path = f"./downloads/watermarked_{base_name}.mp4"
@@ -97,9 +102,10 @@ async def handle_video_with_watermarks(client, message):
         if image_watermark_exists:
             image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
             
-            # Scale watermark to 10% of the input video's width, maintaining aspect ratio.
-            # 'iw*0.1' means 10% of input width, '-1' means auto-calculate height.
-            watermark_scale_expr = f'iw*{0.1}:-1' 
+            # --- FIX for Invalid size 'iw*0.1\:-1' ---
+            # Pass the scale expression as a dictionary value.
+            # ffmpeg-python's filter method handles the string arguments better this way.
+            watermark_scale_expr = 'iw*0.1:-1' # No backslash escaping for the colon here
             watermark_scaled_stream = image_watermark_input.video.filter('scale', watermark_scale_expr)
             
             # Apply opacity (70%) and then overlay the image.
@@ -131,7 +137,7 @@ async def handle_video_with_watermarks(client, message):
         }
         
         # Apply the drawtext filter using keyword arguments from the dictionary
-        video_stream = video_stream.filter('drawtext', **drawtext_args)
+        video_stream = video_stream.filter('drawtext', **drawtext_args) 
         logger.info("Text watermark configured for bottom-center position with dynamic font size.")
 
         # Combine processed video stream with original audio stream
@@ -182,12 +188,20 @@ async def handle_video_with_watermarks(client, message):
         )
 
         logger.info(f"Watermarked video uploaded successfully for user {user_id}.")
-        await status_message.edit_text("Watermarked video uploaded successfully!")
+        try:
+            await status_message.edit_text("Watermarked video uploaded successfully!")
+        except MessageNotModified:
+            logger.debug("Final status message not modified, skipping edit_text.")
+            pass # Ignore if message is already identical
 
     except Exception as e:
         logger.exception(f"An unhandled error occurred during video processing for user {user_id}. Error: {e}")
         if status_message:
-            await status_message.edit_text(f"An unexpected error occurred: {e}")
+            try:
+                await status_message.edit_text(f"An unexpected error occurred: {e}")
+            except MessageNotModified:
+                logger.debug("Error status message not modified, skipping edit_text.")
+                pass
         else:
             await message.reply_text(f"An unexpected error occurred: {e}")
     finally:
