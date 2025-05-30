@@ -14,9 +14,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__) # Get a logger for this module
 
 # --- Configuration for Watermarks ---
-# Default image watermark URL (NEW URL as provided)
+# Default image watermark URL
 DEFAULT_IMAGE_WATERMARK_URL = "https://i.ibb.co/prXzxGDm/mnbots.jpg"
-# Default text watermark (Your provided text)
+# Default text watermark
 DEFAULT_TEXT_WATERMARK = "join @mnbots in telegram"
 
 # Path for the downloaded default image watermark
@@ -96,45 +96,42 @@ async def handle_video_with_watermarks(client, message):
         base_name = os.path.basename(input_file_path).rsplit('.', 1)[0]
         output_file_path = f"./downloads/watermarked_{base_name}.mp4"
 
-        # --- FFmpeg Command Construction using complex_filter ---
+        # --- FFmpeg Command Construction using complex_filter with direct string ---
         main_video_input = ffmpeg.input(input_file_path)
         
         # Get separate input for the image watermark
         image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
 
-        # Build the filtergraph string manually
-        filter_graph_commands = []
-        
-        # Base stream (the input video)
-        video_stream = main_video_input.video
+        # Base streams from inputs
+        video_stream_main = main_video_input.video
         audio_stream = main_video_input.audio
 
-        # 1. Image Watermark (Top Left, Dynamic Size)
-        # We need to scale the image watermark first, then overlay it.
-        # This uses FFmpeg's named pads for clarity in complex filtergraphs.
+        # Prepare for complex filter: inputs should be a list of stream objects
+        streams_for_complex_filter = [video_stream_main]
+
+        # Initialize the filtergraph string
+        # We start with the video stream [0:v] for processing
+        filter_graph_string = "[0:v]" 
         
+        # 1. Image Watermark (Top Left, Dynamic Size)
         if os.path.exists(DEFAULT_IMAGE_WATERMARK_PATH):
-            # Define the scale for the image watermark (10% of video width)
-            watermark_scale_expr = 'iw*0.1:-1' # <--- THIS LINE IS NOW CORRECTLY PLACED AND DEFINED
+            streams_for_complex_filter.append(image_watermark_input.video) # Add image as [1:v]
             
-            # Define the position for the overlay
+            # Define the scale for the image watermark (10% of video width)
+            image_watermark_scale_expr = 'iw*0.1:-1' 
             overlay_x = 10
             overlay_y = 10
             
-            # Define input streams as references (e.g., [0:v] for main video, [1:v] for image watermark)
-            video_input_ref = main_video_input.video
-            image_input_ref = image_watermark_input.video
-
-            # Apply scale, format, and colorchannelmixer to the image watermark stream
-            image_watermark_processing_stream = image_input_ref.filter_('scale', watermark_scale_expr).filter_('format', 'rgba').filter_('colorchannelmixer', aa=0.7)
-
-            # Overlay the processed watermark onto the main video stream
-            video_stream_with_image_wm = ffmpeg.overlay(video_input_ref, image_watermark_processing_stream, x=overlay_x, y=overlay_y)
-            
-            # Now, this combined stream will be the input for the next filter (drawtext)
-            video_stream = video_stream_with_image_wm
-
-            logger.info("Image watermark configured for top-left position with dynamic scaling via complex_filter.")
+            # Append image watermark filter to the string
+            # [main_video_stream][image_watermark_stream]
+            #   image_watermark_stream scaled, formatted, and opacity applied
+            #   then overlay onto the main video stream
+            filter_graph_string += (
+                f"[1:v]scale={image_watermark_scale_expr},format=rgba,colorchannelmixer=aa=0.7[watermark_scaled];" # [1:v] is the image input
+                f"[0:v][watermark_scaled]overlay=x={overlay_x}:y={overlay_y}[video_with_image_wm];" # Overlay onto [0:v]
+                f"[video_with_image_wm]" # Continue with the resulting stream
+            )
+            logger.info("Image watermark configured for top-left position with dynamic scaling via complex_filter (manual string).")
         else:
             logger.warning("Default image watermark file not found. Skipping image watermark.")
 
@@ -143,24 +140,32 @@ async def handle_video_with_watermarks(client, message):
         text_opacity = 0.8 # 80% opacity for text
         
         # Calculate font size dynamically based on video height (e.g., 3% of video height)
-        # Ensure it's an integer and has a minimum size to be readable
         dynamic_font_size = max(18, int(video_height * 0.03)) 
         logger.info(f"Calculated text watermark font size: {dynamic_font_size}")
 
-        # The fontfile path requires proper escaping for FFmpeg's drawtext filter
-        fontfile_escaped = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'.replace(':', '\\:')
+        # The fontfile path needs to be properly escaped for FFmpeg's drawtext filter
+        # Double backslashes needed because the Python f-string will interpret '\:' once
+        fontfile_escaped = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'.replace(':', '\\\\:') 
 
-        # Apply the drawtext filter
-        video_stream = video_stream.filter('drawtext', fontfile=fontfile_escaped, text=text_watermark_content,
-                                            fontcolor=f'white@{text_opacity}', fontsize=dynamic_font_size,
-                                            x='(w-text_w)/2', y='H-text_h-10')
-
+        # Append drawtext filter to the string
+        filter_graph_string += (
+            f"drawtext=fontfile='{fontfile_escaped}':"
+            f"text='{text_watermark_content}':"
+            f"fontcolor=white@{text_opacity}:"
+            f"fontsize={dynamic_font_size}:"
+            f"x=(w-text_w)/2:"
+            f"y=H-text_h-10"
+            f"[video_with_all_wm]" # Final output stream from filters
+        )
         logger.info("Text watermark configured for bottom-center position with dynamic font size.")
 
+        # Execute the complex filtergraph
+        # The output of complex_filter is the named output stream from the graph (e.g., [video_with_all_wm])
+        processed_video_stream = ffmpeg.complex_filter(filter_graph_string, inputs=streams_for_complex_filter).video("video_with_all_wm")
 
-        # Define the output
+        # Define the final output
         final_output = ffmpeg.output(
-            video_stream,
+            processed_video_stream,
             audio_stream, # Map audio from original input (if exists)
             output_file_path,
             vcodec='libx264',    # Video codec for re-encoding
