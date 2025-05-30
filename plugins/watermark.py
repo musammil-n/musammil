@@ -138,13 +138,12 @@ async def handle_video_with_watermarks(client, message):
         video_stream = main_video_input.video # This will be our continuously transformed video stream
         audio_stream = main_video_input.audio
 
-        # 1. Image Watermark (Top Left, Dynamic Size)
+        # 1. Image Watermark (Top Left, Smaller Size)
         if os.path.exists(DEFAULT_IMAGE_WATERMARK_PATH):
             image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
             
-            # FIX: Use proper scale expression without manual escaping
-            # Calculate target width as 10% of video width
-            target_width = max(50, int(video_width * 0.1))  # Minimum 50px width
+            # Decreased watermark size: 5% of video width instead of 10%
+            target_width = max(30, int(video_width * 0.05))  # Minimum 30px width, 5% of video width
             
             # Process the image watermark stream first
             watermark_processed = (image_watermark_input.video
@@ -159,7 +158,7 @@ async def handle_video_with_watermarks(client, message):
         else:
             logger.warning("Default image watermark file not found. Skipping image watermark.")
 
-        # 2. Text Watermark (Bottom Center, Dynamic Font Size)
+        # 2. Text Watermark (Bottom Center, Dynamic Font Size, Show Only for 2 Minutes)
         text_watermark_content = DEFAULT_TEXT_WATERMARK
         text_opacity = 0.8 # 80% opacity for text
         
@@ -183,15 +182,16 @@ async def handle_video_with_watermarks(client, message):
                 break
         
         if fontfile_path:
-            # Apply the drawtext filter to the current video_stream
+            # Apply the drawtext filter with time limitation (show only for first 2 minutes = 120 seconds)
             video_stream = video_stream.filter('drawtext', 
                                              fontfile=fontfile_path,
                                              text=text_watermark_content,
                                              fontcolor=f'white@{text_opacity}', 
                                              fontsize=dynamic_font_size,
                                              x='(main_w-text_w)/2',  # Use main_w instead of w
-                                             y='main_h-text_h-10')   # Use main_h instead of H
-            logger.info(f"Text watermark configured with font: {fontfile_path}")
+                                             y='main_h-text_h-10',   # Use main_h instead of H
+                                             enable='lt(t,120)')      # Enable only when time < 120 seconds
+            logger.info(f"Text watermark configured with font: {fontfile_path} (visible for first 2 minutes only)")
         else:
             # Fallback: use drawtext without fontfile (uses default font)
             video_stream = video_stream.filter('drawtext',
@@ -199,8 +199,9 @@ async def handle_video_with_watermarks(client, message):
                                              fontcolor=f'white@{text_opacity}',
                                              fontsize=dynamic_font_size,
                                              x='(main_w-text_w)/2',
-                                             y='main_h-text_h-10')
-            logger.info("Text watermark configured with default system font.")
+                                             y='main_h-text_h-10',
+                                             enable='lt(t,120)')      # Enable only when time < 120 seconds
+            logger.info("Text watermark configured with default system font (visible for first 2 minutes only).")
 
         # Define the final output, using the now fully processed 'video_stream'
         final_output = ffmpeg.output(
