@@ -54,19 +54,43 @@ async def handle_video_with_watermarks(client, message):
 
     # Determine if it's a direct video or a video document
     input_media = None
+    video_width = 0
+    video_height = 0
+    
+    # Supported video file extensions
+    video_extensions = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ts', '.mts'}
+    
     if message.video:
+        # Direct video message
         input_media = message.video
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith('video/'):
-        input_media = message.document.video # message.document.video holds video metadata for document
+        video_width = input_media.width or 0
+        video_height = input_media.height or 0
+        logger.info(f"Processing direct video message")
+    elif message.document:
+        # Check if it's a video document by MIME type or file extension
+        is_video_by_mime = message.document.mime_type and message.document.mime_type.startswith('video/')
+        is_video_by_extension = False
+        
+        if message.document.file_name:
+            file_ext = os.path.splitext(message.document.file_name.lower())[1]
+            is_video_by_extension = file_ext in video_extensions
+        
+        if is_video_by_mime or is_video_by_extension:
+            input_media = message.document
+            # For video documents, dimensions might not be available
+            # We'll extract them after download if needed
+            video_width = getattr(input_media, 'width', 0) or 0
+            video_height = getattr(input_media, 'height', 0) or 0
+            logger.info(f"Processing video document: {message.document.file_name}")
+        else:
+            await message.reply_text("Please send a video file. Supported formats: MP4, MKV, AVI, MOV, WEBM, FLV, WMV, M4V, 3GP, TS, MTS")
+            return
     else:
-        # Not a video or unsupported file type, ignore
+        # Not a video or unsupported file type
         await message.reply_text("Please send a video file (as a direct video or a video document).")
         return
 
-    # Extract video dimensions for dynamic watermark sizing
-    video_width = input_media.width
-    video_height = input_media.height
-    logger.info(f"Input video dimensions: {video_width}x{video_height}")
+    logger.info(f"Input video dimensions: {video_width}x{video_height} (0 means unknown, will detect after download)")
 
     # Ensure default watermarks are downloaded before processing
     await ensure_default_watermarks()
@@ -85,6 +109,19 @@ async def handle_video_with_watermarks(client, message):
             return
 
         logger.info(f"Video downloaded: {input_file_path}")
+        
+        # If video dimensions are unknown, probe the file to get them
+        if video_width == 0 or video_height == 0:
+            try:
+                probe = ffmpeg.probe(input_file_path)
+                video_stream_info = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+                if video_stream_info:
+                    video_width = video_stream_info.get('width', 720)  # Default fallback
+                    video_height = video_stream_info.get('height', 480)  # Default fallback
+                    logger.info(f"Detected video dimensions from file: {video_width}x{video_height}")
+            except Exception as e:
+                logger.warning(f"Could not probe video dimensions, using defaults. Error: {e}")
+                video_width, video_height = 720, 480  # Safe defaults
         
         # --- FIX for MessageNotModified error (1/3) ---
         try:
