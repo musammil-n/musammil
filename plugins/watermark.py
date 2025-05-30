@@ -7,7 +7,11 @@ import logging
 from pyrogram.errors import MessageNotModified # Import the specific error
 
 # Set up logging for this module
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO, # Set the default logging level to INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__) # Get a logger for this module
 
 # --- Configuration for Watermarks ---
 # Default image watermark URL (NEW URL as provided)
@@ -82,7 +86,7 @@ async def handle_video_with_watermarks(client, message):
 
         logger.info(f"Video downloaded: {input_file_path}")
         
-        # --- FIX for MessageNotModified error ---
+        # --- FIX for MessageNotModified error (1/3) ---
         try:
             await status_message.edit_text("Downloaded. Applying watermarks...")
         except MessageNotModified:
@@ -102,11 +106,10 @@ async def handle_video_with_watermarks(client, message):
         if image_watermark_exists:
             image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
             
-            # --- FIX for Invalid size 'iw*0.1\:-1' ---
-            # Pass the scale expression as a dictionary value.
-            # ffmpeg-python's filter method handles the string arguments better this way.
-            watermark_scale_expr = 'iw*0.1:-1' # No backslash escaping for the colon here
-            watermark_scaled_stream = image_watermark_input.video.filter('scale', watermark_scale_expr)
+            # --- THE CRITICAL FIX FOR THE SCALE FILTER ---
+            # Pass the scale expression as a single string argument using 'c'
+            # to tell ffmpeg-python to treat it as a complex expression directly.
+            watermark_scaled_stream = image_watermark_input.video.filter('scale', c='iw*0.1:-1') # <--- THIS LINE IS CHANGED
             
             # Apply opacity (70%) and then overlay the image.
             # x='10', y='10' places it 10 pixels from the left and 10 pixels from the top.
@@ -160,10 +163,19 @@ async def handle_video_with_watermarks(client, message):
         except ffmpeg.Error as e:
             error_message = f"FFmpeg execution failed for {input_file_path}. Stderr: {e.stderr.decode() if e.stderr else 'N/A'}. Error: {str(e)}"
             logger.error(error_message)
-            await status_message.edit_text(f"Error applying watermarks: {error_message}")
+            try: # FIX for MessageNotModified error (2/3)
+                await status_message.edit_text(f"Error applying watermarks: {error_message}")
+            except MessageNotModified:
+                logger.debug("Error status message not modified, skipping edit_text.")
+                pass
             return
 
-        await status_message.edit_text("Watermarks applied. Uploading...")
+        try: # FIX for MessageNotModified error (3/3)
+            await status_message.edit_text("Watermarks applied. Uploading...")
+        except MessageNotModified:
+            logger.debug("Status message not modified, skipping edit_text.")
+            pass # Ignore if message is already identical
+
         logger.info(f"Uploading processed video: {output_file_path}...")
 
         # Get metadata of the output video for Pyrogram upload parameters
