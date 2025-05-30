@@ -96,42 +96,27 @@ async def handle_video_with_watermarks(client, message):
         base_name = os.path.basename(input_file_path).rsplit('.', 1)[0]
         output_file_path = f"./downloads/watermarked_{base_name}.mp4"
 
-        # --- FFmpeg Command Construction using complex_filter with direct string ---
+        # --- FFmpeg Command Construction using chained filters ---
         main_video_input = ffmpeg.input(input_file_path)
-        
-        # Get separate input for the image watermark
-        image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
-
-        # Base streams from inputs
-        video_stream_main = main_video_input.video
+        video_stream = main_video_input.video # This will be our continuously transformed video stream
         audio_stream = main_video_input.audio
 
-        # Prepare for complex filter: inputs should be a list of stream objects
-        streams_for_complex_filter = [video_stream_main]
-
-        # Initialize the filtergraph string
-        # We start with the video stream [0:v] for processing
-        filter_graph_string = "[0:v]" 
-        
         # 1. Image Watermark (Top Left, Dynamic Size)
         if os.path.exists(DEFAULT_IMAGE_WATERMARK_PATH):
-            streams_for_complex_filter.append(image_watermark_input.video) # Add image as [1:v]
+            image_watermark_input = ffmpeg.input(DEFAULT_IMAGE_WATERMARK_PATH)
             
             # Define the scale for the image watermark (10% of video width)
             image_watermark_scale_expr = 'iw*0.1:-1' 
             overlay_x = 10
             overlay_y = 10
             
-            # Append image watermark filter to the string
-            # [main_video_stream][image_watermark_stream]
-            #   image_watermark_stream scaled, formatted, and opacity applied
-            #   then overlay onto the main video stream
-            filter_graph_string += (
-                f"[1:v]scale={image_watermark_scale_expr},format=rgba,colorchannelmixer=aa=0.7[watermark_scaled];" # [1:v] is the image input
-                f"[0:v][watermark_scaled]overlay=x={overlay_x}:y={overlay_y}[video_with_image_wm];" # Overlay onto [0:v]
-                f"[video_with_image_wm]" # Continue with the resulting stream
-            )
-            logger.info("Image watermark configured for top-left position with dynamic scaling via complex_filter (manual string).")
+            # Process the image watermark stream first
+            watermark_processed = image_watermark_input.video.filter_('scale', image_watermark_scale_expr).filter_('format', 'rgba').filter_('colorchannelmixer', aa=0.7)
+
+            # Overlay the processed watermark onto the main video stream
+            video_stream = ffmpeg.overlay(video_stream, watermark_processed, x=overlay_x, y=overlay_y)
+            
+            logger.info("Image watermark configured for top-left position with dynamic scaling and overlay.")
         else:
             logger.warning("Default image watermark file not found. Skipping image watermark.")
 
@@ -144,28 +129,18 @@ async def handle_video_with_watermarks(client, message):
         logger.info(f"Calculated text watermark font size: {dynamic_font_size}")
 
         # The fontfile path needs to be properly escaped for FFmpeg's drawtext filter
-        # Double backslashes needed because the Python f-string will interpret '\:' once
+        # Using a raw string for safety, and double backslashes for the colon escaping
         fontfile_escaped = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'.replace(':', '\\\\:') 
 
-        # Append drawtext filter to the string
-        filter_graph_string += (
-            f"drawtext=fontfile='{fontfile_escaped}':"
-            f"text='{text_watermark_content}':"
-            f"fontcolor=white@{text_opacity}:"
-            f"fontsize={dynamic_font_size}:"
-            f"x=(w-text_w)/2:"
-            f"y=H-text_h-10"
-            f"[video_with_all_wm]" # Final output stream from filters
-        )
+        # Apply the drawtext filter to the current video_stream
+        video_stream = video_stream.filter('drawtext', fontfile=fontfile_escaped, text=text_watermark_content,
+                                            fontcolor=f'white@{text_opacity}', fontsize=dynamic_font_size,
+                                            x='(w-text_w)/2', y='H-text_h-10')
         logger.info("Text watermark configured for bottom-center position with dynamic font size.")
 
-        # Execute the complex filtergraph
-        # The output of complex_filter is the named output stream from the graph (e.g., [video_with_all_wm])
-        processed_video_stream = ffmpeg.complex_filter(filter_graph_string, inputs=streams_for_complex_filter).video("video_with_all_wm")
-
-        # Define the final output
+        # Define the final output, using the now fully processed 'video_stream'
         final_output = ffmpeg.output(
-            processed_video_stream,
+            video_stream,
             audio_stream, # Map audio from original input (if exists)
             output_file_path,
             vcodec='libx264',    # Video codec for re-encoding
@@ -201,10 +176,10 @@ async def handle_video_with_watermarks(client, message):
         # Get metadata of the output video for Pyrogram upload parameters
         try:
             probe = ffmpeg.probe(output_file_path)
-            output_video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+            output_video_stream_meta = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
             output_duration = int(float(probe['format']['duration'])) if 'duration' in probe['format'] else 0
-            output_width = output_video_stream['width'] if output_video_stream else 0
-            output_height = output_video_stream['height'] if output_video_stream else 0
+            output_width = output_video_stream_meta['width'] if output_video_stream_meta else 0
+            output_height = output_video_stream_meta['height'] if output_video_stream_meta else 0
         except Exception as e:
             logger.warning(f"Could not probe output video for upload metadata. Error: {e}. Using default values.")
             output_duration, output_width, output_height = 0, 0, 0 # Fallback values
